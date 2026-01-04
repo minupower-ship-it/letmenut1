@@ -5,63 +5,83 @@ from config import DATABASE_URL
 async def init_db():
     conn = await asyncpg.connect(DATABASE_URL)
     await conn.execute('''
-        CREATE TABLE IF NOT EXISTS subscriptions (
+        CREATE TABLE IF NOT EXISTS members (
             user_id BIGINT PRIMARY KEY,
             username TEXT,
-            expiry TIMESTAMP NOT NULL,
-            payment_method TEXT,  -- 'stripe', 'paypal', 'crypto'
-            active BOOLEAN DEFAULT TRUE
-        )
+            stripe_customer_id TEXT,
+            stripe_subscription_id TEXT,
+            is_lifetime BOOLEAN DEFAULT FALSE,
+            expiry TIMESTAMP,
+            active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS daily_logs (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            action TEXT,
+            amount DECIMAL DEFAULT 0,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
     ''')
     await conn.close()
 
-async def add_or_update_subscription(user_id: int, username: str, months: int = 1, method: str = "manual"):
-    expiry = datetime.datetime.utcnow() + datetime.timedelta(days=30 * months)
+async def add_member(user_id, username, customer_id=None, subscription_id=None, is_lifetime=False):
+    expiry = None if is_lifetime else (datetime.datetime.utcnow() + datetime.timedelta(days=30))
     conn = await asyncpg.connect(DATABASE_URL)
     await conn.execute('''
-        INSERT INTO subscriptions (user_id, username, expiry, payment_method, active)
-        VALUES ($1, $2, $3, $4, TRUE)
+        INSERT INTO members (user_id, username, stripe_customer_id, stripe_subscription_id, is_lifetime, expiry, active)
+        VALUES ($1, $2, $3, $4, $5, $6, TRUE)
         ON CONFLICT (user_id) DO UPDATE SET
             username = EXCLUDED.username,
+            stripe_customer_id = COALESCE(EXCLUDED.stripe_customer_id, members.stripe_customer_id),
+            stripe_subscription_id = COALESCE(EXCLUDED.stripe_subscription_id, members.stripe_subscription_id),
+            is_lifetime = members.is_lifetime OR EXCLUDED.is_lifetime,
             expiry = EXCLUDED.expiry,
-            payment_method = EXCLUDED.payment_method,
             active = TRUE
-    ''', user_id, username, expiry, method)
+    ''', user_id, username, customer_id, subscription_id, is_lifetime, expiry)
     await conn.close()
-    return expiry
 
-async def get_near_expiry(days_list=[1, 3]):
+async def log_action(user_id, action, amount=0):
     conn = await asyncpg.connect(DATABASE_URL)
-    query = '''
-        SELECT user_id, username, 
-               (expiry::date - CURRENT_DATE) AS days_left
-        FROM subscriptions
-        WHERE active = TRUE
-          AND (expiry::date - CURRENT_DATE) = ANY($1::int[])
-        ORDER BY days_left
-    '''
-    rows = await conn.fetch(query, days_list)
+    await conn.execute('INSERT INTO daily_logs (user_id, action, amount) VALUES ($1, $2, $3)', user_id, action, amount)
     await conn.close()
-    return [(row['user_id'], row['username'] or f"ID{row['user_id']}", row['days_left']) for row in rows]
+
+async def get_member_status(user_id):
+    conn = await asyncpg.connect(DATABASE_URL)
+    row = await conn.fetchrow('''
+        SELECT username, stripe_customer_id, is_lifetime, expiry, created_at
+        FROM members WHERE user_id = $1 AND active = TRUE
+    ''', user_id)
+    await conn.close()
+    return row
+
+async def get_near_expiry():
+    conn = await asyncpg.connect(DATABASE_URL)
+    rows = await conn.fetch('''
+        SELECT user_id, username, (expiry::date - CURRENT_DATE) AS days_left
+        FROM members
+        WHERE active = TRUE AND NOT is_lifetime AND (expiry::date - CURRENT_DATE) IN (1, 3)
+    ''')
+    await conn.close()
+    return [(r['user_id'], r['username'] or f"ID{r['user_id']}", r['days_left']) for r in rows]
 
 async def get_expired_today():
     conn = await asyncpg.connect(DATABASE_URL)
     rows = await conn.fetch('''
-        SELECT user_id, username
-        FROM subscriptions
-        WHERE active = TRUE
-          AND expiry::date = CURRENT_DATE
+        SELECT user_id, username FROM members
+        WHERE active = TRUE AND NOT is_lifetime AND expiry::date = CURRENT_DATE
     ''')
     await conn.close()
-    return [(row['user_id'], row['username'] or f"ID{row['user_id']}") for row in rows]
+    return [(r['user_id'], r['username'] or f"ID{r['user_id']}") for r in rows]
 
-async def get_overdue(days=7):
+async def get_daily_stats():
     conn = await asyncpg.connect(DATABASE_URL)
+    today = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     rows = await conn.fetch('''
-        SELECT user_id, username
-        FROM subscriptions
-        WHERE active = TRUE
-          AND expiry < CURRENT_TIMESTAMP - INTERVAL '%s days'
-    ''', days)
+        SELECT COUNT(DISTINCT user_id) AS unique_users,
+               SUM(amount) FILTER (WHERE action LIKE 'payment_stripe%') AS total_revenue
+        FROM daily_logs
+        WHERE timestamp >= $1
+    ''', today)
     await conn.close()
-    return [(row['user_id'], row['username'] or f"ID{row['user_id']}") for row in rows]
+    return rows[0] if rows else {'unique_users': 0, 'total_revenue': 0}
