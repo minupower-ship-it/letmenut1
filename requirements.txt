@@ -1,5 +1,5 @@
 python-telegram-bot==20.8
-asyncpg
-stripe
-python-dotenv
-flask
+asyncpg==0.29.0
+stripe==10.7.0
+python-dotenv==1.0.1
+flask==3.0.3
