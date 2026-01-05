@@ -17,7 +17,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 flask_app = Flask(__name__)
 application = None
 
-# 다국어 텍스트 (EN / AR / ES 완벽 지원 + 여백 추가)
+# 다국어 텍스트 (EN / AR / ES)
 TEXTS = {
     "EN": {
         "welcome": "\n👋 *Welcome to Premium Access Bot* 👋\n\n"
