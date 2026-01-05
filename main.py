@@ -13,7 +13,7 @@ from utils import create_invite_link, send_daily_report
 stripe.api_key = STRIPE_SECRET_KEY
 
 flask_app = Flask(__name__)
-application = None  # 전역으로 선언
+application = None  # 전역으로 사용
 
 @flask_app.route('/webhook/stripe', methods=['POST'])
 def stripe_webhook():
@@ -21,7 +21,7 @@ def stripe_webhook():
     sig_header = request.headers.get('Stripe-Signature')
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
-    except:
+    except Exception as e:
         return abort(400)
 
     if event['type'] == 'checkout.session.completed':
@@ -31,11 +31,13 @@ def stripe_webhook():
         price_id = session['line_items']['data'][0]['price']['id']
 
         is_lifetime = (price_id == PRICE_ID_LIFETIME)
-        amount = 100 if is_lifetime else 10
+        amount = 50 if is_lifetime else 20  # 실제 결제 금액 로그용
 
-        asyncio.run(add_member(user_id, username, session['customer'], session.get('subscription'), is_lifetime))
+        # DB 저장 및 로그
+        asyncio.run(add_member(user_id, username, session.get('customer'), session.get('subscription'), is_lifetime))
         asyncio.run(log_action(user_id, 'payment_stripe_lifetime' if is_lifetime else 'payment_stripe_monthly', amount))
 
+        # 초대 링크 생성 (10분 만료)
         invite_link, expire_time = asyncio.run(create_invite_link(application.bot))
         plan = "Lifetime 💎" if is_lifetime else "Monthly 🔄"
 
@@ -46,10 +48,6 @@ def stripe_webhook():
             f"Expires: {expire_time}\n"
             f"Enjoy the premium content! 🔥"
         ))
-
-    elif event['type'] == 'customer.subscription.deleted':
-        # 취소 자동 처리 (선택)
-        pass
 
     return '', 200
 
@@ -87,14 +85,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == 'subscribe':
         keyboard = [
-            [InlineKeyboardButton("🔄 Monthly ($10/month)", callback_data='monthly')],
-            [InlineKeyboardButton("💎 Lifetime ($100)", callback_data='lifetime')],
+            [InlineKeyboardButton("🔄 Monthly ($20/month)", callback_data='monthly')],
+            [InlineKeyboardButton("💎 Lifetime ($50)", callback_data='lifetime')],
             [InlineKeyboardButton("🅿️ PayPal Inquiry", callback_data='paypal')],
             [InlineKeyboardButton("₿ Crypto Inquiry", callback_data='crypto')],
             [InlineKeyboardButton("⬅️ Back", callback_data='back')]
         ]
         await query.edit_message_text(
             "🔥 Choose Your Premium Plan 🔥\n\n"
+            "• Monthly: $20/month (auto-renew)\n"
+            "• Lifetime: $50 (permanent access)\n\n"
             "⚠️ Invite links expire in 10 minutes for security.",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -114,13 +114,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await query.edit_message_text(
             f"Proceeding to {plan_name} payment via Stripe...",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💳 Pay Now", url=session.url)]])
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💳 Pay Now", url=session.url)],
+                [InlineKeyboardButton("⬅️ Back", callback_data='back')]
+            ])
         )
 
     elif query.data in ['paypal', 'crypto']:
         method = "PayPal" if query.data == 'paypal' else "Crypto"
         await context.bot.send_message(ADMIN_USER_ID, f"{method} payment request from @{username} (ID: {user_id})")
-        await query.edit_message_text(f"{method} request received! Admin will contact you soon 🚀")
+        await query.edit_message_text(
+            f"{method} request received! Admin will contact you soon 🚀",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data='back')]])
+        )
 
     elif query.data == 'status':
         row = await get_member_status(user_id)
@@ -175,14 +181,20 @@ async def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
 
+    # 매일 보고서
     application.job_queue.run_daily(send_daily_report, time=datetime.time(9, 0))
 
+    # 필수 초기화 순서
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+
+    # Flask 웹훅 (Stripe)
     import threading
     threading.Thread(target=lambda: flask_app.run(port=10000), daemon=True).start()
 
     print("Premium Bot is now running!")
-    await application.start()
-    await application.updater.start_polling()
+
     await asyncio.Event().wait()
 
 if __name__ == '__main__':
