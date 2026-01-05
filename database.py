@@ -4,6 +4,7 @@ from config import DATABASE_URL
 
 async def init_db():
     conn = await asyncpg.connect(DATABASE_URL)
+    # 기본 테이블 생성
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS members (
             user_id BIGINT PRIMARY KEY,
@@ -13,7 +14,6 @@ async def init_db():
             is_lifetime BOOLEAN DEFAULT FALSE,
             expiry TIMESTAMP,
             active BOOLEAN DEFAULT TRUE,
-            language TEXT DEFAULT 'EN',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS daily_logs (
@@ -24,8 +24,16 @@ async def init_db():
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     ''')
+
+    # language 컬럼이 없으면 추가 (기존 DB에도 안전하게 적용)
+    try:
+        await conn.execute('ALTER TABLE members ADD COLUMN language TEXT DEFAULT \'EN\';')
+    except asyncpg.DuplicateColumnError:
+        pass  # 이미 있으면 무시
+
     await conn.close()
 
+# 나머지 함수들은 이전과 동일
 async def add_member(user_id, username, customer_id=None, subscription_id=None, is_lifetime=False, language='EN'):
     expiry = None if is_lifetime else (datetime.datetime.utcnow() + datetime.timedelta(days=30))
     conn = await asyncpg.connect(DATABASE_URL)
@@ -39,7 +47,7 @@ async def add_member(user_id, username, customer_id=None, subscription_id=None, 
             is_lifetime = members.is_lifetime OR EXCLUDED.is_lifetime,
             expiry = EXCLUDED.expiry,
             active = TRUE,
-            language = EXCLUDED.language
+            language = COALESCE(EXCLUDED.language, members.language)
     ''', user_id, username, customer_id, subscription_id, is_lifetime, expiry, language)
     await conn.close()
 
