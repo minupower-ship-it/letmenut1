@@ -25,15 +25,19 @@ TEXTS = {
                    "Unlock exclusive adult content, daily updates, and special perks in our private Telegram channel.\n\n"
                    "Choose your plan, complete payment, and get instant access via a secure invite link.\n\n"
                    "Our team is always here to support you 🤝\n\n"
-                   "Welcome to the ultimate premium experience 🌟",
-        "date_line": "\n📅 {date} — System Active\n⚡️ Instant Access — Ready",
+                   "Welcome to the ultimate premium experience 🌟
+                   
+        ",
+        "date_line": "\n📅 {date} — System Active
+        
+⚡️ Instant Access — ON",
         "plans_btn": "📦 View Plans",
         "status_btn": "📊 My Subscription",
         "help_btn": "❓ Help & Support",
         "select_plan": "🔥 *Choose Your Membership Plan* 🔥\n\n"
                        "Select the option that suits you best:",
-        "monthly": "🔄 Monthly — $20/month (auto-renew)",
-        "lifetime": "💎 Lifetime — $50 (one-time permanent)",
+        "monthly": "🔄 Monthly — $20/month",
+        "lifetime": "💎 Lifetime — $50 ",
         "payment_method": "💳 *Select Payment Method*\n\n"
                           "For {plan} — How would you like to pay?",
         "stripe": "💳 Stripe (Instant & Secure)",
@@ -383,3 +387,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
