@@ -17,7 +17,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 flask_app = Flask(__name__)
 application = None
 
-# 다국어 텍스트 (EN / AR / ES 완벽 지원)
+# 다국어 텍스트 (EN / AR / ES 완벽 지원 + 여백 추가)
 TEXTS = {
     "EN": {
         "welcome": "\n👋 *Welcome to Premium Access Bot* 👋\n\n"
@@ -217,9 +217,170 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, lan
     elif update.callback_query:
         await update.callback_query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
-# button_handler부터 main()까지는 이전과 완전히 동일 (변경 없음)
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    lang = await get_user_language(user_id) or "EN"
 
-# (이전 버전의 button_handler, stripe_webhook, main 함수 그대로 사용)
+    if query.data.startswith('lang_'):
+        new_lang = query.data.split('_')[1].upper()
+        if new_lang not in TEXTS:
+            new_lang = "EN"
+        await set_user_language(user_id, new_lang)
+        await query.edit_message_text(f"✅ Language changed to {new_lang}!")
+        await show_main_menu(query, context, new_lang)
+        return
+
+    if query.data == 'plans':
+        keyboard = [
+            [InlineKeyboardButton(t("monthly", lang), callback_data='select_monthly')],
+            [InlineKeyboardButton(t("lifetime", lang), callback_data='select_lifetime')],
+            [InlineKeyboardButton(t("back", lang), callback_data='back_to_main')]
+        ]
+        await query.edit_message_text(t("select_plan", lang), parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data in ['select_monthly', 'select_lifetime']:
+        plan_name = "Monthly ($20)" if query.data == 'select_monthly' else "Lifetime ($50)"
+        is_lifetime = query.data == 'select_lifetime'
+
+        keyboard = [
+            [InlineKeyboardButton(t("stripe", lang), callback_data=f'pay_stripe_{"lifetime" if is_lifetime else "monthly"}')],
+            [InlineKeyboardButton(t("paypal", lang), callback_data=f'pay_paypal_{"lifetime" if is_lifetime else "monthly"}')],
+            [InlineKeyboardButton(t("crypto", lang), callback_data=f'pay_crypto_{"lifetime" if is_lifetime else "monthly"}')],
+            [InlineKeyboardButton(t("back", lang), callback_data='plans')]
+        ]
+        await query.edit_message_text(t("payment_method", lang, plan=plan_name), parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith('pay_stripe_'):
+        plan_type = query.data.split('_')[2]
+        price_id = PRICE_ID_MONTHLY if plan_type == 'monthly' else PRICE_ID_LIFETIME
+
+        session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            line_items=[{'price': price_id, 'quantity': 1}],
+            mode='subscription' if plan_type == 'monthly' else 'payment',
+            success_url=SUCCESS_URL,
+            cancel_url=CANCEL_URL,
+            metadata={'user_id': user_id}
+        )
+        await query.edit_message_text(t("stripe_redirect", lang), parse_mode='Markdown',
+                                      reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t("pay_now", lang), url=session.url)]]))
+
+    elif query.data.startswith('pay_paypal_'):
+        plan_type = query.data.split('_')[2]
+        plan_name = "Lifetime ($50)" if plan_type == 'lifetime' else "Monthly ($20)"
+        paypal_link = "https://www.paypal.com/paypalme/minwookim384/50usd" if plan_type == 'lifetime' else "https://www.paypal.com/paypalme/minwookim384/20usd"
+
+        keyboard = [
+            [InlineKeyboardButton(t("pay_paypal", lang), url=paypal_link)],
+            [InlineKeyboardButton(t("proof_here", lang), url="https://t.me/mbrypie")],
+            [InlineKeyboardButton(t("back", lang), callback_data='plans')]
+        ]
+        await query.edit_message_text(t("paypal_text", lang, plan=plan_name), parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith('pay_crypto_'):
+        qr_url = "https://files.catbox.moe/fkxh5l.png"
+        caption = t("crypto_text", lang)
+
+        await query.message.reply_photo(
+            photo=qr_url,
+            caption=caption,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(t("proof_here", lang), url="https://t.me/mbrypie")],
+                [InlineKeyboardButton(t("back", lang), callback_data='plans')]
+            ])
+        )
+        await query.message.delete()
+
+    elif query.data == 'status':
+        row = await get_member_status(user_id)
+        if not row:
+            await query.edit_message_text(t("no_sub", lang), parse_mode='Markdown',
+                                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t("plans_btn", lang), callback_data='plans')]]))
+        else:
+            plan_text = "Lifetime 💎" if row['is_lifetime'] else "Monthly 🔄"
+            payment_date = row['created_at'].strftime('%b %d, %Y')
+            expire_text = "Permanent access" if row['is_lifetime'] else row['expiry'].strftime('%b %d, %Y')
+
+            message = (
+                f"{t('status_title', lang)}\n\n"
+                f"{t('plan', lang)}: {plan_text}\n"
+                f"{t('payment_date', lang)}: {payment_date}\n"
+                f"{t('expires', lang)}: {expire_text}\n\n"
+                f"{t('manage_sub', lang)}"
+            )
+
+            keyboard = [[InlineKeyboardButton(t("back", lang), callback_data='back_to_main')]]
+            if row['stripe_customer_id']:
+                portal = stripe.billing_portal.Session.create(customer=row['stripe_customer_id'], return_url=PORTAL_RETURN_URL)
+                keyboard.insert(0, [InlineKeyboardButton("❌ Manage & Cancel", url=portal.url)])
+
+            await query.edit_message_text(message, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == 'help':
+        await query.edit_message_text(t("help_text", lang), parse_mode='Markdown',
+                                      reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t("back", lang), callback_data='back_to_main')]]))
+
+    elif query.data == 'back_to_main':
+        await show_main_menu(query, context, lang)
+
+@flask_app.route('/webhook/stripe', methods=['POST'])
+def stripe_webhook():
+    payload = request.data
+    sig_header = request.headers.get('Stripe-Signature')
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except Exception:
+        return abort(400)
+
+    if event['type'] == 'checkout.session.completed':
+        session = event['data']['object']
+        user_id = int(session['metadata']['user_id'])
+        username = session.get('customer_details', {}).get('email') or f"user_{user_id}"
+        price_id = session['line_items']['data'][0]['price']['id']
+
+        is_lifetime = (price_id == PRICE_ID_LIFETIME)
+        amount = 50 if is_lifetime else 20
+
+        asyncio.run(add_member(user_id, username, session.get('customer'), session.get('subscription'), is_lifetime))
+        asyncio.run(log_action(user_id, 'payment_stripe_lifetime' if is_lifetime else 'payment_stripe_monthly', amount))
+
+        invite_link, expire_time = asyncio.run(create_invite_link(application.bot))
+        plan = "Lifetime 💎" if is_lifetime else "Monthly 🔄"
+
+        asyncio.run(application.bot.send_message(
+            user_id,
+            f"🎉 {plan} Payment Successful!\n\n"
+            f"Your private channel invite link (expires in 10 minutes):\n{invite_link}\n\n"
+            f"Expires: {expire_time}\n"
+            f"Enjoy the premium content! 🔥"
+        ))
+
+    return '', 200
+
+async def main():
+    global application
+    await init_db()
+
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_handler))
+
+    application.job_queue.run_daily(send_daily_report, time=datetime.time(9, 0))
+
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+
+    import threading
+    threading.Thread(target=lambda: flask_app.run(host='0.0.0.0', port=10000), daemon=True).start()
+
+    print("Premium Bot is now running!")
+
+    await asyncio.Event().wait()
 
 if __name__ == '__main__':
     asyncio.run(main())
