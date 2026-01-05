@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import stripe
+import asyncpg  # <-- 이거 추가로 NameError 해결!
 from flask import Flask, request, abort
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,56 +16,55 @@ stripe.api_key = STRIPE_SECRET_KEY
 flask_app = Flask(__name__)
 application = None
 
-# 다국어 텍스트 (여백과 단락을 넉넉히 넣어 가독성 UP)
+# 다국어 텍스트 (여백, 단락, 볼드 강조로 가독성 극대화)
 TEXTS = {
     "EN": {
-        "welcome": "👋 *Welcome to our Premium Subscription Bot!* 👋\n\n"
-                   "We’re thrilled to have you here! 🎉\n\n"
-                   "Get instant access to exclusive adult content, daily updates, and special perks through our private Telegram channel.\n\n"
-                   "Choose a plan below, complete payment, and receive your private invite link immediately.\n\n"
-                   "If you have any questions, we’re always here to help 🤝\n\n"
-                   "Welcome to the premium experience 🌟",
-        "date_line": "\n📅 {date} — System Active\n⚡️ Immediate Access — Enabled",
+        "welcome": "👋 *Welcome to Premium Access Bot* 👋\n\n"
+                   "We're thrilled to have you join us! 🎉\n\n"
+                   "Unlock exclusive adult content, daily updates, and special perks in our private Telegram channel.\n\n"
+                   "Choose your plan, complete payment, and get instant access via a secure invite link.\n\n"
+                   "Our team is always here to support you 🤝\n\n"
+                   "Welcome to the ultimate premium experience 🌟",
+        "date_line": "\n📅 {date} — System Active\n⚡️ Instant Access — Ready",
         "plans_btn": "📦 View Plans",
         "status_btn": "📊 My Subscription",
         "help_btn": "❓ Help & Support",
         "select_plan": "🔥 *Choose Your Membership Plan* 🔥\n\n"
-                       "Select the option that best fits your needs:",
-        "monthly": "🔄 Monthly Access — $20/month",
-        "lifetime": "💎 Lifetime Access — $50 (one-time)",
-        "payment_method": "💳 *Payment Method for {plan}*\n\n"
-                          "How would you like to complete your purchase?",
-        "stripe": "💳 Stripe (Instant & Automatic)",
+                       "Select the option that suits you best:",
+        "monthly": "🔄 Monthly — $20/month (auto-renew)",
+        "lifetime": "💎 Lifetime — $50 (one-time permanent)",
+        "payment_method": "💳 *Select Payment Method*\n\n"
+                          "For {plan} — How would you like to pay?",
+        "stripe": "💳 Stripe (Instant & Secure)",
         "paypal": "🅿️ PayPal",
         "crypto": "₿ Crypto (USDT TRC20)",
-        "stripe_redirect": "🔒 Redirecting to secure Stripe checkout...\n\nYour access will be granted instantly upon completion.",
+        "stripe_redirect": "🔒 Redirecting to secure Stripe checkout...\n\n"
+                           "Your access will be activated immediately after payment.",
         "paypal_text": "*PayPal Payment — {plan}*\n\n"
-                       "Click the button below to be redirected to PayPal.\n\n"
-                       "After completing payment, please send proof (screenshot) to proceed.",
+                       "Click below to go to PayPal.\n\n"
+                       "After payment, send a screenshot as proof to get your invite link.",
         "crypto_text": "*Crypto Payment — USDT (TRC20)*\n\n"
-                       "Send the exact amount to the address below:\n\n"
+                       "Send exact amount to:\n\n"
                        "`TERhALhVLZRqnS3mZGhE1XgxyLnKHfgBLi`\n\n"
-                       "After sending, forward the transaction proof to get instant access.",
+                       "Forward transaction proof for instant access.",
         "no_sub": "😔 No active subscription found.\n\n"
-                  "Ready to unlock premium content?\nChoose a plan below to get started!",
+                  "Ready to unlock exclusive content?\nChoose a plan to begin!",
         "status_title": "📊 *Your Subscription Status*",
         "plan": "Plan",
         "payment_date": "Payment Date",
         "expires": "Expires",
         "permanent": "Permanent access",
-        "manage_sub": "\nManage your subscription (cancel, update card, etc.):",
+        "manage_sub": "\nManage your subscription below:",
         "help_text": "❓ *Help & Support*\n\n"
-                     "• Payment issues → Use PayPal or Crypto and send proof\n"
-                     "• Check status → My Subscription button\n"
-                     "• Questions or support → Contact @mbrypie directly\n\n"
-                     "We’re here to help you enjoy the best experience! 🚀",
+                     "• Payment questions → Use PayPal/Crypto and send proof\n"
+                     "• View status → My Subscription button\n"
+                     "• Need assistance → Contact @mbrypie\n\n"
+                     "We're here 24/7 to help! 🚀",
         "back": "⬅️ Back",
         "proof_here": "📤 Send Proof Here",
         "pay_now": "💳 Pay with Stripe",
         "pay_paypal": "💸 Pay with PayPal"
-    },
-    # AR과 ES는 필요시 추가 (현재 EN만으로도 충분히 예쁨)
-    # 나중에 추가하고 싶으면 알려줘!
+    }
 }
 
 def t(key, lang="EN", **kwargs):
@@ -88,28 +88,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lang = await get_user_language(user_id)
 
-    if lang == "EN":  # 첫 방문이면 언어 선택 (현재 EN만 구현, 나중에 AR/ES 추가 가능)
+    # 첫 방문 시 언어 선택 (현재 EN만 완벽 지원, 나중에 AR/ES 추가 가능)
+    if lang == "EN" and not await get_member_status(user_id):  # 새 유저일 때만 언어 선택 (선택적)
         keyboard = [
             [InlineKeyboardButton("🇬🇧 English", callback_data='lang_en')],
             # [InlineKeyboardButton("🇸🇦 العربية", callback_data='lang_ar')],
             # [InlineKeyboardButton("🇪🇸 Español", callback_data='lang_es')]
         ]
-        await update.message.reply_text("🌍 Select your preferred language:", reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
-        await show_main_menu(update, context, lang)
+        await update.message.reply_text("🌍 Choose your language:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    await show_main_menu(update, context, lang)
 
 async def show_main_menu(update, context, lang):
     today = datetime.datetime.utcnow().strftime("%b %d")
 
-    await update.message.reply_text(
-        t("welcome", lang) + t("date_line", lang, date=today),
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(t("plans_btn", lang), callback_data='plans')],
-            [InlineKeyboardButton(t("status_btn", lang), callback_data='status')],
-            [InlineKeyboardButton(t("help_btn", lang), callback_data='help')]
-        ])
-    )
+    text = t("welcome", lang) + t("date_line", lang, date=today)
+
+    keyboard = [
+        [InlineKeyboardButton(t("plans_btn", lang), callback_data='plans')],
+        [InlineKeyboardButton(t("status_btn", lang), callback_data='status')],
+        [InlineKeyboardButton(t("help_btn", lang), callback_data='help')]
+    ]
+
+    if update.message:
+        await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.callback_query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -118,7 +123,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = await get_user_language(user_id)
 
     if query.data.startswith('lang_'):
-        new_lang = "EN"  # 현재 EN만 지원
+        new_lang = "EN"
         await set_user_language(user_id, new_lang)
         await query.edit_message_text("✅ Language set to English!")
         await show_main_menu(query, context, new_lang)
@@ -184,7 +189,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton(t("back", lang), callback_data='plans')]
             ])
         )
-        await query.message.delete()
+        await query.message.delete()  # 기존 메시지 지워서 깔끔하게
 
     elif query.data == 'status':
         row = await get_member_status(user_id)
@@ -193,9 +198,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t("plans_btn", lang), callback_data='plans')]]))
             return
 
-        plan_text = t("lifetime", lang) if row['is_lifetime'] else t("monthly", lang)
+        plan_text = "Lifetime 💎" if row['is_lifetime'] else "Monthly 🔄"
         payment_date = row['created_at'].strftime('%b %d, %Y')
-        expire_text = t("permanent", lang) if row['is_lifetime'] else row['expiry'].strftime('%b %d, %Y')
+        expire_text = "Permanent access" if row['is_lifetime'] else row['expiry'].strftime('%b %d, %Y')
 
         message = (
             f"{t('status_title', lang)}\n\n"
@@ -219,8 +224,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data in ['back_to_main', 'back']:
         await show_main_menu(query, context, lang)
 
-# 나머지 webhook, main 함수는 이전과 동일 (initialize, polling 등)
-
 async def main():
     global application
     await init_db()
@@ -239,7 +242,7 @@ async def main():
     import threading
     threading.Thread(target=lambda: flask_app.run(port=10000), daemon=True).start()
 
-    print("Premium Bot is now running with enhanced UX!")
+    print("Premium Bot is now running with ultimate UX!")
 
     await asyncio.Event().wait()
 
